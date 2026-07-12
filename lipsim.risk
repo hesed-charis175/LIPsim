@@ -1,0 +1,317 @@
+import "@tui.risk";
+
+// Linear Inverted Pendulum Terminal Simulator With PID control
+
+
+block Sim {
+    theta:      f64;
+    theta_dot:  f64;
+    x:          f64;
+    x_dot:      f64;
+    integral:   f64;
+    prev_error: f64;
+    u:          f64;
+    p_term:     f64;
+    i_term:     f64;
+    d_term:     f64;
+    t:          f64;
+    crashed:    i32;
+    kp:         f64;
+    ki:         f64;
+    kd:         f64;
+    history:    Array<f64>;
+}
+
+cartMass: f64 = 1.0; 
+poleMass: f64 = 0.2; 
+poleLength: f64 = 0.5;
+gravity: f64 = 9.81;
+cartFriction: f64 = 0.9; 
+poleFriction: f64 = 0.02; 
+uMax: f64 = 60.0; 
+xLimit: f64 = 2.2; 
+thetaFail: f64 = 1.0472; // 60deg
+maxHist: i32 = 160;
+
+func fmt2(v: f64) -> string {
+    r: f64 = floor(v * 100.0 + 0.5) / 100.0;
+    return toString(r);
+}
+
+func clampF(v: f64, lo: f64, hi: f64) -> f64 {
+    if (v < lo) { return lo; }
+    if (v > hi) { return hi; }
+    return v;
+}
+
+func simInit() -> Sim {
+    s: Sim;
+    s.kp = 90.0;
+    s.ki = 12.0;
+    s.kd = 24.0;
+    s.history = [];
+    s = simResetKeepGains(s);
+    return s;
+}
+
+func simResetKeepGains(s_in: Sim) -> Sim {
+    s: Sim = s_in;
+    s.theta      = 1;
+    s.theta_dot  = 0.0;
+    s.x          = 0.0;
+    s.x_dot      = 0.0;
+    s.integral   = 0.0;
+    s.prev_error = 0.0;
+    s.u          = 0.0;
+    s.p_term     = 0.0;
+    s.i_term     = 0.0;
+    s.d_term     = 0.0;
+    s.t          = 0.0;
+    s.crashed    = 0;
+    s.history    = [];
+    return s;
+}
+
+func simStep(s_in: Sim, dt: f64) -> Sim {
+    s: Sim = s_in;
+    if (s.crashed == 1) { return s; }
+
+    error: f64 = s.theta;
+    s.integral = clampF(s.integral + error * dt, 0.0 - 8.0, 8.0);
+    deriv: f64 = (error - s.prev_error) / dt;
+    s.prev_error = error;
+
+    s.p_term = s.kp * error;
+    s.i_term = s.ki * s.integral;
+    s.d_term = s.kd * deriv;
+
+    u: f64 = s.p_term + s.i_term + s.d_term;
+    u = clampF(u, 0.0 - uMax, uMax);
+    s.u = u;
+
+    theta_ddot: f64 = ((cartMass + poleMass) * gravity * s.theta - u - poleFriction * s.theta_dot) / (cartMass * poleLength);
+    x_ddot: f64     = (u - cartFriction * s.x_dot) / cartMass - (poleMass * gravity / cartMass) * s.theta;
+
+    s.theta_dot = s.theta_dot + theta_ddot * dt;
+    s.theta     = s.theta + s.theta_dot * dt;
+    s.x_dot     = s.x_dot + x_ddot * dt;
+    s.x         = s.x + s.x_dot * dt;
+
+    if (s.x < (0.0 - xLimit)) { s.x = 0.0 - xLimit; s.x_dot = 0.0; }
+    if (s.x > xLimit)         { s.x = xLimit;       s.x_dot = 0.0; }
+
+    s.t = s.t + dt;
+
+    if (s.theta > thetaFail)         { s.crashed = 1; }
+    if (s.theta < (0.0 - thetaFail)) { s.crashed = 1; }
+
+    return s;
+}
+
+func simPushHistory(s_in: Sim) -> Sim {
+    s: Sim = s_in;
+    s.history.push(radToDeg(s.theta));
+    if (length(s.history) > maxHist) {
+        s.history.removeAt(0);
+    }
+    return s;
+}
+
+func drawHeader(buf: Buffer, w: i32, s: Sim) -> void {
+    empty_title: Array<i32> = [];
+    panelDraw(buf, 0, 0, w, 3, empty_title, COLOR_BRIGHT_CYAN(), COLOR_BLACK());
+    bufWriteCpsString(buf, 1, 3,
+        ["LINEAR INVERTED PENDULUM  -  PID CONTROL"],
+        COLOR_BRIGHT_WHITE(), COLOR_BLACK(), ATTR_BOLD());
+
+    status: string = "running";
+    status_fg: i32 = COLOR_OK();
+    if (s.crashed == 1) {
+        status = "CRASHED -- press r to reset";
+        status_fg = COLOR_ERROR();
+    }
+
+    line: string = strConcat("t = ", fmt2(s.t), "s    status: ", status);
+    bufWriteCpsString(buf, 1, w - 44, [line], status_fg, COLOR_BLACK(), ATTR_NONE());
+}
+
+func drawAnim(buf: Buffer, row: i32, col: i32, w: i32, h: i32, s: Sim) -> void {
+    empty_title: Array<i32> = [];
+    panelDraw(buf, row, col, w, h, empty_title, COLOR_WHITE(), COLOR_BLACK());
+
+    margin: i32     = 4;
+    track_row: i32  = row + h - 4;
+    inner_left: i32  = col + margin;
+    inner_right: i32 = col + w - margin - 1;
+    track_w: i32     = inner_right - inner_left + 1;
+
+    bufRepeatCp(buf, track_row, inner_left, track_w, BOX_H(),
+                COLOR_BRIGHT_BLACK(), COLOR_BLACK(), ATTR_NONE());
+    tuiBufferSet(buf, track_row, inner_left - 1, BOX_LM(), COLOR_BRIGHT_BLACK(), COLOR_BLACK(), ATTR_NONE());
+    tuiBufferSet(buf, track_row, inner_right + 1, BOX_RM(), COLOR_BRIGHT_BLACK(), COLOR_BLACK(), ATTR_NONE());
+
+    frac: f64 = (s.x + xLimit) / (2.0 * xLimit);
+    cart_col: i32 = inner_left + cast<i32>(floor(frac * (track_w - 1) + 0.5));
+
+    cart_half: i32 = 3;
+    cart_left: i32 = cart_col - cart_half;
+    cart_w: i32    = cart_half * 2 + 1;
+    cart_row: i32  = track_row - 1;
+
+    cart_fg: i32 = COLOR_BRIGHT_BLUE();
+    if (s.crashed == 1) { cart_fg = COLOR_BRIGHT_RED(); }
+
+    bufRepeatCp(buf, cart_row, cart_left, cart_w, BLOCK_FULL(), cart_fg, COLOR_BLACK(), ATTR_NONE());
+    tuiBufferSet(buf, cart_row + 1, cart_left + 1, DOT_MED(), COLOR_BRIGHT_BLACK(), COLOR_BLACK(), ATTR_NONE());
+    tuiBufferSet(buf, cart_row + 1, cart_left + cart_w - 2, DOT_MED(), COLOR_BRIGHT_BLACK(), COLOR_BLACK(), ATTR_NONE());
+
+    pole_rows: i32 = cart_row - (row + 1);
+    if (pole_rows > 10) { pole_rows = 10; }
+
+    theta_abs: f64 = s.theta;
+    if (theta_abs < 0.0) { theta_abs = 0.0 - theta_abs; }
+
+    pole_fg: i32 = COLOR_BRIGHT_GREEN();
+    if (theta_abs > thetaFail * 0.6)  { pole_fg = COLOR_BRIGHT_YELLOW(); }
+    if (theta_abs > thetaFail * 0.85) { pole_fg = COLOR_BRIGHT_RED(); }
+    if (s.crashed == 1)                  { pole_fg = COLOR_BRIGHT_RED(); }
+
+    hscale: f64 = 1.9;
+    step: i32 = 1;
+    while (step <= pole_rows) {
+        rr: i32 = cart_row - step;
+        dx: f64 = hscale * step * tan(s.theta);
+        cc: i32 = cart_col + cast<i32>(floor(dx + 0.5));
+        tuiBufferSet(buf, rr, cc, BOX_V(), pole_fg, COLOR_BLACK(), ATTR_BOLD());
+        step += 1;
+    }
+
+    tip_dx: f64 = hscale * pole_rows * tan(s.theta);
+    tip_col: i32 = cart_col + cast<i32>(floor(tip_dx + 0.5));
+    tip_row: i32 = cart_row - pole_rows;
+    tuiBufferSet(buf, tip_row, tip_col, DOT_LARGE(), pole_fg, COLOR_BLACK(), ATTR_BOLD());
+
+    if (s.crashed == 1) {
+        msg: string = "*** PENDULUM FELL OVER ***";
+        bufWriteCpsString(buf, row + 2, col + w / 2 - 14, [msg],
+                           COLOR_BRIGHT_RED(), COLOR_BLACK(), ATTR_BOLD());
+    }
+}
+
+func drawStatePanel(buf: Buffer, row: i32, col: i32, w: i32, h: i32, s: Sim) -> void {
+    empty_title: Array<i32> = [];
+    panelDraw(buf, row, col, w, h, empty_title, COLOR_BRIGHT_MAGENTA(), COLOR_BLACK());
+    bufWriteCpsString(buf, row, col + 2, ["STATE"], COLOR_BRIGHT_MAGENTA(), COLOR_BLACK(), ATTR_BOLD());
+
+    theta_deg: f64     = radToDeg(s.theta);
+    theta_dot_deg: f64 = radToDeg(s.theta_dot);
+
+    l1: string = strConcat("angle       : ", fmt2(theta_deg), " deg");
+    l2: string = strConcat("angular vel : ", fmt2(theta_dot_deg), " deg/s");
+    l3: string = strConcat("cart x      : ", fmt2(s.x), " m");
+    l4: string = strConcat("cart vel    : ", fmt2(s.x_dot), " m/s");
+
+    bufWriteCpsString(buf, row + 2, col + 2, [l1], COLOR_WHITE(), COLOR_BLACK(), ATTR_NONE());
+    bufWriteCpsString(buf, row + 3, col + 2, [l2], COLOR_WHITE(), COLOR_BLACK(), ATTR_NONE());
+    bufWriteCpsString(buf, row + 4, col + 2, [l3], COLOR_WHITE(), COLOR_BLACK(), ATTR_NONE());
+    bufWriteCpsString(buf, row + 5, col + 2, [l4], COLOR_WHITE(), COLOR_BLACK(), ATTR_NONE());
+}
+
+func drawControlPanel(buf: Buffer, row: i32, col: i32, w: i32, h: i32, s: Sim) -> void {
+    empty_title: Array<i32> = [];
+    panelDraw(buf, row, col, w, h, empty_title, COLOR_BRIGHT_YELLOW(), COLOR_BLACK());
+    bufWriteCpsString(buf, row, col + 2, ["PID CONTROL"], COLOR_BRIGHT_YELLOW(), COLOR_BLACK(), ATTR_BOLD());
+
+    g1: string = strConcat("Kp=", fmt2(s.kp), "  Ki=", fmt2(s.ki), "  Kd=", fmt2(s.kd));
+    g2: string = strConcat("P=", fmt2(s.p_term), "  I=", fmt2(s.i_term), "  D=", fmt2(s.d_term));
+    g3: string = strConcat("force u = ", fmt2(s.u), " N");
+
+    bufWriteCpsString(buf, row + 2, col + 2, [g1], COLOR_WHITE(), COLOR_BLACK(), ATTR_NONE());
+    bufWriteCpsString(buf, row + 3, col + 2, [g2], COLOR_WHITE(), COLOR_BLACK(), ATTR_NONE());
+    bufWriteCpsString(buf, row + 4, col + 2, [g3], COLOR_BRIGHT_CYAN(), COLOR_BLACK(), ATTR_BOLD());
+}
+
+func drawChart(buf: Buffer, row: i32, col: i32, w: i32, h: i32, s: Sim) -> void {
+    empty_title: Array<i32> = [];
+    panelDraw(buf, row, col, w, h, empty_title, COLOR_BRIGHT_CYAN(), COLOR_BLACK());
+    bufWriteCpsString(buf, row, col + 2, ["ANGLE HISTORY (deg)"], COLOR_BRIGHT_CYAN(), COLOR_BLACK(), ATTR_BOLD());
+
+    if (length(s.history) >= 2) {
+        series: Array<Array<f64>> = [];
+        series.push(s.history);
+        colors: Array<i32> = [];
+        colors.push(COLOR_BRIGHT_GREEN());
+        brailleChartDraw(buf, row + 2, col + 2, w - 4, h - 3,
+                          series, colors, 0.0 - 30.0, 30.0, 6, COLOR_BLACK());
+    }
+}
+
+func drawFooter(buf: Buffer, row: i32) -> void {
+    hint: string = "[q] quit   [r] reset   [<-/->] push cart   [w/s] Kp+/-   [e/d] Kd+/-   [space] pause";
+    bufWriteCpsString(buf, row, 2, [hint], COLOR_BRIGHT_BLACK(), COLOR_BLACK(), ATTR_NONE());
+}
+
+func main() -> i32 {
+    tuiSetup();
+
+    W: i32 = 94;
+    H: i32 = 33;
+    buf: Buffer = tuiBufferNew(W, H);
+
+    s: Sim = simInit();
+
+    paused: i32 = 0;
+    substeps: i32 = 8;
+    dt: f64 = 0.0025;
+
+    running: i32 = 1;
+    while (running == 1) {
+
+            key: i32 = KEY_NONE();
+            if (kbHit() == 1) {
+                key = kbReadKey();
+            }
+            if (key == KEY_CTRL_C()) { running = 0; }
+            if (key == 113) { running = 0; } // 'q'
+            if (key == 27)  { running = 0; } // ESC
+            if (key == 114) { s = simResetKeepGains(s); } // 'r'
+            if (key == 32) {
+                if (paused == 1) { paused = 0; } else { paused = 1; }
+            }
+            if (key == KEY_LEFT())  { s.theta_dot = s.theta_dot - 0.6; }
+            if (key == KEY_RIGHT()) { s.theta_dot = s.theta_dot + 0.6; }
+            if (key == 119) { s.kp = s.kp + 5.0; } // 'w'
+            if (key == 115) {
+                s.kp = s.kp - 5.0;
+                if (s.kp < 0.0) { s.kp = 0.0; }
+            } // 's'
+            if (key == 101) { s.kd = s.kd + 2.0; } // 'e'
+            if (key == 100) {
+                s.kd = s.kd - 2.0;
+                if (s.kd < 0.0) { s.kd = 0.0; }
+            } // 'd'
+
+        if (paused == 0) {
+            i: i32 = 0;
+            while (i < substeps) {
+                s = simStep(s, dt);
+                i += 1;
+            }
+            s = simPushHistory(s);
+        }
+
+        tuiBufferClear(buf);
+        drawHeader(buf, W, s);
+        drawAnim(buf, 3, 0, W, 15, s);
+        drawStatePanel(buf, 18, 0, 47, 6, s);
+        drawControlPanel(buf, 18, 47, 47, 6, s);
+        drawChart(buf, 24, 0, W, 8, s);
+        drawFooter(buf, 32);
+
+        tuiBufferRender(buf);
+        timeSleep(20);
+    }
+
+    tuiCleanup();
+    return 0;
+}
